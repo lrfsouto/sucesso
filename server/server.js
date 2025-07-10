@@ -102,7 +102,9 @@ async function initializeDatabase() {
     }
   } catch (error) {
     console.error('❌ Erro na inicialização do banco:', error);
-    console.log('⚠️ Continuando sem banco de dados - modo fallback');
+    console.log('⚠️ Continuando sem banco de dados - modo fallback ativado');
+    console.log('💡 Para usar MySQL, configure as variáveis no arquivo server/.env');
+    // Não relançar o erro - continuar em modo fallback
   }
 }
 
