@@ -1,69 +1,88 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import database from '../database/connection.js';
-import { authenticateToken, requireAdmin } from '../middleware/auth.js';
+import { authenticateToken, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Aplicar autenticação a todas as rotas
-router.use(authenticateToken);
+// Dados em memória para fallback
+let fallbackBusinesses = [];
 
-// Obter configurações do estabelecimento
-router.get('/settings', requireAdmin, async (req, res) => {
+// Função para usar banco ou fallback
+async function safeQuery(operation, fallbackOperation) {
   try {
-    const business = await database.get(`
-      SELECT * FROM businesses WHERE id = ?
-    `, [req.user.businessId]);
-
-    if (!business) {
-      return res.status(404).json({ error: 'Estabelecimento não encontrado' });
+    if (database.pool) {
+      return await operation();
     }
-
-    // Buscar configurações adicionais
-    const settings = await database.all(`
-      SELECT key, value FROM settings WHERE business_id = ?
-    `, [req.user.businessId]);
-
-    const settingsObj = settings.reduce((acc, setting) => {
-      acc[setting.key] = setting.value;
-      return acc;
-    }, {});
-
-    res.json({
-      ...business,
-      settings: settingsObj
-    });
   } catch (error) {
-    console.error('Erro ao obter configurações:', error);
+    console.log('⚠️ Usando dados em memória (fallback)');
+  }
+  return fallbackOperation();
+}
+
+// Listar estabelecimentos
+router.get('/', authenticateToken, async (req, res) => {
+  try {
+    const businesses = await safeQuery(
+      async () => {
+        if (req.user.role === 'super_admin') {
+          return await database.all('SELECT * FROM businesses ORDER BY name');
+        } else {
+          return await database.all('SELECT * FROM businesses WHERE id = ?', [req.user.businessId]);
+        }
+      },
+      () => {
+        if (req.user.role === 'super_admin') {
+          return fallbackBusinesses;
+        } else {
+          return fallbackBusinesses.filter(b => b.id === req.user.businessId);
+        }
+      }
+    );
+
+    res.json(businesses);
+  } catch (error) {
+    console.error('Erro ao listar estabelecimentos:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
 
-// Atualizar configurações do estabelecimento
-router.put('/settings', requireAdmin, async (req, res) => {
+// Criar estabelecimento
+router.post('/', authenticateToken, requireRole(['super_admin']), async (req, res) => {
   try {
-    const { name, subtitle, logoUrl, useCustomLogo, settings } = req.body;
+    const { name, address, phone, email, cnpj } = req.body;
 
-    // Atualizar dados básicos do estabelecimento
-    await database.run(`
-      UPDATE businesses 
-      SET name = ?, subtitle = ?, logo_url = ?, use_custom_logo = ?
-      WHERE id = ?
-    `, [name, subtitle, logoUrl, useCustomLogo, req.user.businessId]);
-
-    // Atualizar configurações adicionais
-    if (settings) {
-      for (const [key, value] of Object.entries(settings)) {
-        await database.run(`
-          INSERT OR REPLACE INTO settings (id, business_id, key, value, updated_at)
-          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        `, [uuidv4(), req.user.businessId, key, value]);
-      }
+    if (!name) {
+      return res.status(400).json({ error: 'Nome é obrigatório' });
     }
 
-    res.json({ success: true, message: 'Configurações atualizadas com sucesso' });
+    const businessId = uuidv4();
+    const businessData = {
+      id: businessId,
+      name,
+      address: address || '',
+      phone: phone || '',
+      email: email || '',
+      cnpj: cnpj || '',
+      created_at: new Date().toISOString()
+    };
+
+    await safeQuery(
+      async () => {
+        await database.run(
+          `INSERT INTO businesses (id, name, address, phone, email, cnpj, created_at) 
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [businessId, name, address || '', phone || '', email || '', cnpj || '', new Date()]
+        );
+      },
+      () => {
+        fallbackBusinesses.push(businessData);
+      }
+    );
+
+    res.status(201).json(businessData);
   } catch (error) {
-    console.error('Erro ao atualizar configurações:', error);
+    console.error('Erro ao criar estabelecimento:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });

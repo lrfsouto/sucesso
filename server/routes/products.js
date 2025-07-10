@@ -1,21 +1,41 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import database from '../database/connection.js';
-import { authenticateToken, requireOperator } from '../middleware/auth.js';
+import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Aplicar autenticação a todas as rotas
-router.use(authenticateToken);
+// Dados em memória para fallback
+let fallbackProducts = [];
+
+// Função para usar banco ou fallback
+async function safeQuery(operation, fallbackOperation) {
+  try {
+    if (database.pool) {
+      return await operation();
+    }
+  } catch (error) {
+    console.log('⚠️ Usando dados em memória (fallback)');
+  }
+  return fallbackOperation();
+}
 
 // Listar produtos
-router.get('/', requireOperator, async (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
   try {
-    const products = await database.all(`
-      SELECT * FROM products 
-      WHERE business_id = ? 
-      ORDER BY name
-    `, [req.user.businessId]);
+    const businessId = req.headers['x-business-id'] || req.user.businessId;
+    
+    const products = await safeQuery(
+      async () => {
+        return await database.all(
+          'SELECT * FROM products WHERE business_id = ? ORDER BY name',
+          [businessId]
+        );
+      },
+      () => {
+        return fallbackProducts.filter(p => p.business_id === businessId);
+      }
+    );
 
     res.json(products);
   } catch (error) {
@@ -24,116 +44,47 @@ router.get('/', requireOperator, async (req, res) => {
   }
 });
 
-// Buscar produto por código de barras
-router.get('/barcode/:barcode', requireOperator, async (req, res) => {
+// Criar produto
+router.post('/', authenticateToken, async (req, res) => {
   try {
-    const { barcode } = req.params;
-    
-    const product = await database.get(`
-      SELECT * FROM products 
-      WHERE business_id = ? AND barcode = ?
-    `, [req.user.businessId, barcode]);
+    const businessId = req.headers['x-business-id'] || req.user.businessId;
+    const { name, barcode, price, cost, stock, minStock, category, unit } = req.body;
 
-    if (!product) {
-      return res.status(404).json({ error: 'Produto não encontrado' });
+    if (!name || !price) {
+      return res.status(400).json({ error: 'Nome e preço são obrigatórios' });
     }
-
-    res.json(product);
-  } catch (error) {
-    console.error('Erro ao buscar produto:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Criar produto (apenas admin)
-router.post('/', async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Apenas administradores podem criar produtos' });
-    }
-
-    const { name, barcode, category, brand, price, cost, stock, minStock, unit } = req.body;
 
     const productId = uuidv4();
-    await database.run(`
-      INSERT INTO products (id, business_id, name, barcode, category, brand, price, cost, stock, min_stock, unit)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [productId, req.user.businessId, name, barcode, category, brand, price, cost, stock || 0, minStock || 0, unit || 'unidade']);
+    const productData = {
+      id: productId,
+      business_id: businessId,
+      name,
+      barcode: barcode || '',
+      price: parseFloat(price),
+      cost: parseFloat(cost) || 0,
+      stock: parseInt(stock) || 0,
+      min_stock: parseInt(minStock) || 0,
+      category: category || 'Geral',
+      unit: unit || 'UN',
+      created_at: new Date().toISOString()
+    };
 
-    const product = await database.get('SELECT * FROM products WHERE id = ?', [productId]);
-    res.status(201).json(product);
+    await safeQuery(
+      async () => {
+        await database.run(
+          `INSERT INTO products (id, business_id, name, barcode, price, cost, stock, min_stock, category, unit, created_at) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [productId, businessId, name, barcode || '', price, cost || 0, stock || 0, minStock || 0, category || 'Geral', unit || 'UN', new Date()]
+        );
+      },
+      () => {
+        fallbackProducts.push(productData);
+      }
+    );
+
+    res.status(201).json(productData);
   } catch (error) {
     console.error('Erro ao criar produto:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Atualizar produto (apenas admin)
-router.put('/:id', async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Apenas administradores podem editar produtos' });
-    }
-
-    const { id } = req.params;
-    const { name, barcode, category, brand, price, cost, stock, minStock, unit } = req.body;
-
-    await database.run(`
-      UPDATE products 
-      SET name = ?, barcode = ?, category = ?, brand = ?, price = ?, cost = ?, 
-          stock = ?, min_stock = ?, unit = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND business_id = ?
-    `, [name, barcode, category, brand, price, cost, stock, minStock, unit, id, req.user.businessId]);
-
-    const product = await database.get('SELECT * FROM products WHERE id = ?', [id]);
-    res.json(product);
-  } catch (error) {
-    console.error('Erro ao atualizar produto:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Deletar produto (apenas admin)
-router.delete('/:id', async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Apenas administradores podem deletar produtos' });
-    }
-
-    const { id } = req.params;
-
-    const result = await database.run(`
-      DELETE FROM products 
-      WHERE id = ? AND business_id = ?
-    `, [id, req.user.businessId]);
-
-    if (result.changes === 0) {
-      return res.status(404).json({ error: 'Produto não encontrado' });
-    }
-
-    res.json({ success: true, message: 'Produto deletado com sucesso' });
-  } catch (error) {
-    console.error('Erro ao deletar produto:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Atualizar estoque
-router.patch('/:id/stock', requireOperator, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { quantity } = req.body;
-
-    await database.run(`
-      UPDATE products 
-      SET stock = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND business_id = ?
-    `, [quantity, id, req.user.businessId]);
-
-    const product = await database.get('SELECT * FROM products WHERE id = ?', [id]);
-    res.json(product);
-  } catch (error) {
-    console.error('Erro ao atualizar estoque:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });

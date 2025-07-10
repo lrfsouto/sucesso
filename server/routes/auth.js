@@ -3,156 +3,67 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import database from '../database/connection.js';
-import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Fallback para quando MySQL não está disponível
-let fallbackMode = false;
+// Dados em memória para fallback (quando MySQL não está disponível)
 let fallbackData = {
   users: [],
-  credentials: []
+  userCredentials: []
 };
 
-// Função para verificar se o banco está disponível
-async function checkDatabase() {
+// Função para usar banco ou fallback
+async function safeQuery(operation, fallbackOperation) {
   try {
-    if (!database.pool) {
-      await database.connect();
+    if (database.pool) {
+      return await operation();
     }
-    await database.get('SELECT 1');
-    return true;
   } catch (error) {
-    if (!fallbackMode) {
-      console.log('⚠️ Ativando modo fallback - dados em memória');
-      fallbackMode = true;
-    }
-    return false;
+    console.log('⚠️ Usando dados em memória (fallback)');
   }
+  return fallbackOperation();
 }
 
-// Super Admin Login
-router.post('/super-admin', async (req, res) => {
+// Registrar novo usuário (solicitação de acesso)
+router.post('/register', async (req, res) => {
   try {
-    const { password } = req.body;
+    const { name, email, phone, businessName, businessType } = req.body;
 
-    if (password !== process.env.SUPER_ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Senha incorreta' });
-    }
-
-    const token = jwt.sign(
-      { isSuperAdmin: true },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    res.json({ 
-      success: true, 
-      token,
-      user: { isSuperAdmin: true }
-    });
-  } catch (error) {
-    console.error('Erro no login super admin:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Solicitar acesso
-router.post('/request-access', async (req, res) => {
-  try {
-    const { fullName, email, businessName, businessDescription } = req.body;
-
-    const dbAvailable = await checkDatabase();
-    
-    if (!dbAvailable) {
-      // Modo fallback
-      const existing = fallbackData.users.find(u => u.email === email.toLowerCase());
-      if (existing) {
-        return res.status(400).json({ error: 'Já existe uma solicitação para este email' });
-      }
-      
-      fallbackData.users.push({
-        id: uuidv4(),
-        email: email.toLowerCase(),
-        full_name: fullName,
-        business_name: businessName,
-        business_description: businessDescription,
-        status: 'pending',
-        created_at: new Date()
-      });
-      
-      return res.json({ success: true, message: 'Solicitação enviada com sucesso (modo fallback)' });
-    }
-
-    // Verificar se já existe solicitação
-    const existing = await database.get(
-      'SELECT id FROM users WHERE email = ?',
-      [email.toLowerCase()]
-    );
-
-    if (existing) {
-      return res.status(400).json({ error: 'Já existe uma solicitação para este email' });
+    if (!name || !email || !businessName) {
+      return res.status(400).json({ error: 'Dados obrigatórios não fornecidos' });
     }
 
     const userId = uuidv4();
-    await database.run(`
-      INSERT INTO users (id, email, full_name, business_name, business_description, status)
-      VALUES (?, ?, ?, ?, ?, 'pending')
-    `, [userId, email.toLowerCase(), fullName, businessName, businessDescription]);
+    const userData = {
+      id: userId,
+      name,
+      email,
+      phone: phone || '',
+      business_name: businessName,
+      business_type: businessType || 'Outros',
+      status: 'pending',
+      created_at: new Date().toISOString()
+    };
 
-    res.json({ success: true, message: 'Solicitação enviada com sucesso' });
-  } catch (error) {
-    console.error('Erro ao solicitar acesso:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Configurar senhas duplas
-router.post('/setup-passwords', async (req, res) => {
-  try {
-    const { email, adminCredentials, operatorCredentials } = req.body;
-
-    // Verificar se usuário está aprovado
-    const user = await database.get(
-      'SELECT * FROM users WHERE email = ? AND status = ?',
-      [email.toLowerCase(), 'approved']
-    );
-
-    if (!user) {
-      return res.status(404).json({ error: 'Usuário não encontrado ou não aprovado' });
-    }
-
-    // Verificar se já tem credenciais
-    const existingCredentials = await database.get(
-      'SELECT id FROM user_credentials WHERE user_id = ?',
-      [user.id]
-    );
-
-    if (existingCredentials) {
-      return res.status(400).json({ error: 'Credenciais já configuradas' });
-    }
-
-    // Hash das senhas
-    const adminPasswordHash = await bcrypt.hash(adminCredentials.password, 12);
-    const operatorPasswordHash = await bcrypt.hash(operatorCredentials.password, 12);
-
-    // Inserir credenciais
-    await database.transaction([
-      {
-        sql: `INSERT INTO user_credentials (id, user_id, username, password_hash, role)
-              VALUES (?, ?, ?, ?, 'admin')`,
-        params: [uuidv4(), user.id, adminCredentials.username, adminPasswordHash]
+    await safeQuery(
+      async () => {
+        await database.run(
+          `INSERT INTO users (id, name, email, phone, business_name, business_type, status, created_at) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [userId, name, email, phone || '', businessName, businessType || 'Outros', 'pending', new Date()]
+        );
       },
-      {
-        sql: `INSERT INTO user_credentials (id, user_id, username, password_hash, role)
-              VALUES (?, ?, ?, ?, 'operator')`,
-        params: [uuidv4(), user.id, operatorCredentials.username, operatorPasswordHash]
+      () => {
+        fallbackData.users.push(userData);
       }
-    ]);
+    );
 
-    res.json({ success: true, message: 'Credenciais configuradas com sucesso' });
+    res.status(201).json({ 
+      message: 'Solicitação de acesso enviada com sucesso! Aguarde aprovação do administrador.',
+      userId 
+    });
   } catch (error) {
-    console.error('Erro ao configurar senhas:', error);
+    console.error('Erro ao registrar usuário:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
@@ -160,170 +71,85 @@ router.post('/setup-passwords', async (req, res) => {
 // Login
 router.post('/login', async (req, res) => {
   try {
-    const { email, username, password } = req.body;
+    const { email, password, role } = req.body;
 
-    // Buscar usuário e credenciais
-    const userWithCredentials = await database.get(`
-      SELECT u.*, uc.id as credential_id, uc.username, uc.password_hash, uc.role
-      FROM users u
-      JOIN user_credentials uc ON u.id = uc.user_id
-      WHERE u.email = ? AND uc.username = ? AND u.status = 'approved'
-    `, [email.toLowerCase(), username]);
+    if (!email || !password || !role) {
+      return res.status(400).json({ error: 'Email, senha e função são obrigatórios' });
+    }
 
-    if (!userWithCredentials) {
-      return res.status(401).json({ error: 'Credenciais inválidas' });
+    // Verificar se é super admin
+    if (email === 'admin@vitana.com' && password === process.env.SUPER_ADMIN_PASSWORD) {
+      const token = jwt.sign(
+        { id: 'super-admin', email, role: 'super_admin' },
+        process.env.JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+
+      return res.json({
+        token,
+        user: {
+          id: 'super-admin',
+          email,
+          role: 'super_admin',
+          name: 'Super Administrador'
+        }
+      });
+    }
+
+    // Buscar credenciais do usuário
+    const credentials = await safeQuery(
+      async () => {
+        return await database.get(
+          `SELECT uc.*, u.name, u.business_name, u.status 
+           FROM user_credentials uc 
+           JOIN users u ON uc.user_id = u.id 
+           WHERE u.email = ? AND uc.role = ?`,
+          [email, role]
+        );
+      },
+      () => {
+        const user = fallbackData.users.find(u => u.email === email && u.status === 'approved');
+        if (!user) return null;
+        
+        return fallbackData.userCredentials.find(uc => uc.user_id === user.id && uc.role === role);
+      }
+    );
+
+    if (!credentials) {
+      return res.status(401).json({ error: 'Credenciais inválidas ou usuário não aprovado' });
     }
 
     // Verificar senha
-    const passwordValid = await bcrypt.compare(password, userWithCredentials.password_hash);
-    if (!passwordValid) {
+    const validPassword = await bcrypt.compare(password, credentials.password_hash);
+    if (!validPassword) {
       return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
-    // Atualizar último login
-    await database.run(
-      'UPDATE user_credentials SET last_login = CURRENT_TIMESTAMP WHERE id = ?',
-      [userWithCredentials.credential_id]
-    );
-
     // Gerar token
     const token = jwt.sign(
-      {
-        userId: userWithCredentials.id,
-        credentialId: userWithCredentials.credential_id,
-        role: userWithCredentials.role,
-        businessId: 'default-business'
+      { 
+        id: credentials.user_id, 
+        email, 
+        role: credentials.role,
+        businessId: credentials.business_id 
       },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
 
     res.json({
-      success: true,
       token,
       user: {
-        id: userWithCredentials.id,
-        email: userWithCredentials.email,
-        name: userWithCredentials.full_name,
-        username: userWithCredentials.username,
-        role: userWithCredentials.role,
-        businessId: 'default-business'
+        id: credentials.user_id,
+        email,
+        role: credentials.role,
+        name: credentials.name,
+        businessName: credentials.business_name,
+        businessId: credentials.business_id
       }
     });
   } catch (error) {
     console.error('Erro no login:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Verificar status do usuário
-router.post('/check-status', async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    const user = await database.get(
-      'SELECT status FROM users WHERE email = ?',
-      [email.toLowerCase()]
-    );
-
-    if (!user) {
-      return res.json({ status: 'not_found' });
-    }
-
-    if (user.status === 'approved') {
-      // Verificar se já tem credenciais
-      const hasCredentials = await database.get(
-        'SELECT id FROM user_credentials WHERE user_id = (SELECT id FROM users WHERE email = ?)',
-        [email.toLowerCase()]
-      );
-
-      return res.json({ 
-        status: hasCredentials ? 'ready' : 'needs_setup'
-      });
-    }
-
-    res.json({ status: user.status });
-  } catch (error) {
-    console.error('Erro ao verificar status:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Verificar token
-router.get('/verify', authenticateToken, (req, res) => {
-  res.json({ 
-    valid: true, 
-    user: req.user 
-  });
-});
-
-// Listar solicitações (Super Admin)
-router.get('/requests', async (req, res) => {
-  try {
-    const dbAvailable = await checkDatabase();
-    
-    if (!dbAvailable) {
-      return res.json(fallbackData.users);
-    }
-    
-    const requests = await database.all(`
-      SELECT id, email, full_name, business_name, business_description, 
-             status, rejection_reason, created_at
-      FROM users 
-      ORDER BY created_at DESC
-    `);
-
-    res.json(requests);
-  } catch (error) {
-    console.error('Erro ao listar solicitações:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Aprovar acesso (Super Admin)
-router.post('/approve/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    const dbAvailable = await checkDatabase();
-    
-    if (!dbAvailable) {
-      const user = fallbackData.users.find(u => u.id === userId);
-      if (user) {
-        user.status = 'approved';
-        user.approved_at = new Date();
-      }
-      return res.json({ success: true, message: 'Acesso aprovado (modo fallback)' });
-    }
-
-    await database.run(`
-      UPDATE users 
-      SET status = 'approved', approved_at = CURRENT_TIMESTAMP 
-      WHERE id = ?
-    `, [userId]);
-
-    res.json({ success: true, message: 'Acesso aprovado' });
-  } catch (error) {
-    console.error('Erro ao aprovar acesso:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Rejeitar acesso (Super Admin)
-router.post('/reject/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { reason } = req.body;
-
-    await database.run(`
-      UPDATE users 
-      SET status = 'rejected', rejection_reason = ? 
-      WHERE id = ?
-    `, [reason, userId]);
-
-    res.json({ success: true, message: 'Acesso rejeitado' });
-  } catch (error) {
-    console.error('Erro ao rejeitar acesso:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });

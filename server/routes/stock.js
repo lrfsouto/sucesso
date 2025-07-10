@@ -1,46 +1,46 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import database from '../database/connection.js';
-import { authenticateToken, requireAdmin } from '../middleware/auth.js';
+import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Aplicar autenticação a todas as rotas
-router.use(authenticateToken);
+// Dados em memória para fallback
+let fallbackStockMovements = [];
 
-// Listar movimentações de estoque (apenas admin)
-router.get('/movements', requireAdmin, async (req, res) => {
+// Função para usar banco ou fallback
+async function safeQuery(operation, fallbackOperation) {
   try {
-    const { productId, startDate, endDate, limit = 50 } = req.query;
-    
-    let sql = `
-      SELECT sm.*, p.name as product_name
-      FROM stock_movements sm
-      JOIN products p ON sm.product_id = p.id
-      WHERE sm.business_id = ?
-    `;
-    
-    const params = [req.user.businessId];
-    
-    if (productId) {
-      sql += ' AND sm.product_id = ?';
-      params.push(productId);
+    if (database.pool) {
+      return await operation();
     }
-    
-    if (startDate) {
-      sql += ' AND sm.created_at >= ?';
-      params.push(startDate);
-    }
-    
-    if (endDate) {
-      sql += ' AND sm.created_at <= ?';
-      params.push(endDate);
-    }
-    
-    sql += ' ORDER BY sm.created_at DESC LIMIT ?';
-    params.push(parseInt(limit));
+  } catch (error) {
+    console.log('⚠️ Usando dados em memória (fallback)');
+  }
+  return fallbackOperation();
+}
 
-    const movements = await database.all(sql, params);
+// Listar movimentações de estoque
+router.get('/movements', authenticateToken, async (req, res) => {
+  try {
+    const businessId = req.headers['x-business-id'] || req.user.businessId;
+    
+    const movements = await safeQuery(
+      async () => {
+        return await database.all(
+          `SELECT sm.*, p.name as product_name 
+           FROM stock_movements sm 
+           JOIN products p ON sm.product_id = p.id 
+           WHERE sm.business_id = ? 
+           ORDER BY sm.created_at DESC`,
+          [businessId]
+        );
+      },
+      () => {
+        return fallbackStockMovements.filter(sm => sm.business_id === businessId);
+      }
+    );
+
     res.json(movements);
   } catch (error) {
     console.error('Erro ao listar movimentações:', error);
@@ -48,76 +48,44 @@ router.get('/movements', requireAdmin, async (req, res) => {
   }
 });
 
-// Adicionar movimentação de estoque (apenas admin)
-router.post('/movements', requireAdmin, async (req, res) => {
+// Criar movimentação de estoque
+router.post('/movements', authenticateToken, async (req, res) => {
   try {
-    const { productId, type, quantity, reason, unitCost } = req.body;
+    const businessId = req.headers['x-business-id'] || req.user.businessId;
+    const { productId, type, quantity, reason } = req.body;
 
-    if (!['entrada', 'saida'].includes(type)) {
-      return res.status(400).json({ error: 'Tipo deve ser "entrada" ou "saida"' });
+    if (!productId || !type || !quantity) {
+      return res.status(400).json({ error: 'Produto, tipo e quantidade são obrigatórios' });
     }
 
     const movementId = uuidv4();
-    const totalCost = unitCost ? unitCost * quantity : null;
+    const movementData = {
+      id: movementId,
+      business_id: businessId,
+      product_id: productId,
+      type,
+      quantity: parseInt(quantity),
+      reason: reason || '',
+      user_id: req.user.id,
+      created_at: new Date().toISOString()
+    };
 
-    // Iniciar transação
-    const operations = [
-      // Inserir movimentação
-      {
-        sql: `INSERT INTO stock_movements (id, business_id, product_id, type, quantity, reason, unit_cost, total_cost)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        params: [movementId, req.user.businessId, productId, type, quantity, reason, unitCost, totalCost]
+    await safeQuery(
+      async () => {
+        await database.run(
+          `INSERT INTO stock_movements (id, business_id, product_id, type, quantity, reason, user_id, created_at) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [movementId, businessId, productId, type, quantity, reason || '', req.user.id, new Date()]
+        );
+      },
+      () => {
+        fallbackStockMovements.push(movementData);
       }
-    ];
+    );
 
-    // Atualizar estoque do produto
-    const stockChange = type === 'entrada' ? quantity : -quantity;
-    operations.push({
-      sql: `UPDATE products 
-            SET stock = stock + ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND business_id = ?`,
-      params: [stockChange, productId, req.user.businessId]
-    });
-
-    // Se for entrada com custo, atualizar custo do produto
-    if (type === 'entrada' && unitCost) {
-      operations.push({
-        sql: `UPDATE products 
-              SET cost = ?, updated_at = CURRENT_TIMESTAMP
-              WHERE id = ? AND business_id = ?`,
-        params: [unitCost, productId, req.user.businessId]
-      });
-    }
-
-    await database.transaction(operations);
-
-    // Buscar movimentação criada
-    const movement = await database.get(`
-      SELECT sm.*, p.name as product_name
-      FROM stock_movements sm
-      JOIN products p ON sm.product_id = p.id
-      WHERE sm.id = ?
-    `, [movementId]);
-
-    res.status(201).json(movement);
+    res.status(201).json(movementData);
   } catch (error) {
-    console.error('Erro ao adicionar movimentação:', error);
-    res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-});
-
-// Obter produtos com estoque baixo
-router.get('/low-stock', requireAdmin, async (req, res) => {
-  try {
-    const products = await database.all(`
-      SELECT * FROM products 
-      WHERE business_id = ? AND stock <= min_stock AND min_stock > 0
-      ORDER BY (stock - min_stock) ASC
-    `, [req.user.businessId]);
-
-    res.json(products);
-  } catch (error) {
-    console.error('Erro ao obter produtos com estoque baixo:', error);
+    console.error('Erro ao criar movimentação:', error);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });
