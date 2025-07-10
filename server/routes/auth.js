@@ -7,6 +7,30 @@ import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 
+// Fallback para quando MySQL não está disponível
+let fallbackMode = false;
+let fallbackData = {
+  users: [],
+  credentials: []
+};
+
+// Função para verificar se o banco está disponível
+async function checkDatabase() {
+  try {
+    if (!database.pool) {
+      await database.connect();
+    }
+    await database.get('SELECT 1');
+    return true;
+  } catch (error) {
+    if (!fallbackMode) {
+      console.log('⚠️ Ativando modo fallback - dados em memória');
+      fallbackMode = true;
+    }
+    return false;
+  }
+}
+
 // Super Admin Login
 router.post('/super-admin', async (req, res) => {
   try {
@@ -37,6 +61,28 @@ router.post('/super-admin', async (req, res) => {
 router.post('/request-access', async (req, res) => {
   try {
     const { fullName, email, businessName, businessDescription } = req.body;
+
+    const dbAvailable = await checkDatabase();
+    
+    if (!dbAvailable) {
+      // Modo fallback
+      const existing = fallbackData.users.find(u => u.email === email.toLowerCase());
+      if (existing) {
+        return res.status(400).json({ error: 'Já existe uma solicitação para este email' });
+      }
+      
+      fallbackData.users.push({
+        id: uuidv4(),
+        email: email.toLowerCase(),
+        full_name: fullName,
+        business_name: businessName,
+        business_description: businessDescription,
+        status: 'pending',
+        created_at: new Date()
+      });
+      
+      return res.json({ success: true, message: 'Solicitação enviada com sucesso (modo fallback)' });
+    }
 
     // Verificar se já existe solicitação
     const existing = await database.get(
@@ -214,6 +260,12 @@ router.get('/verify', authenticateToken, (req, res) => {
 // Listar solicitações (Super Admin)
 router.get('/requests', async (req, res) => {
   try {
+    const dbAvailable = await checkDatabase();
+    
+    if (!dbAvailable) {
+      return res.json(fallbackData.users);
+    }
+    
     const requests = await database.all(`
       SELECT id, email, full_name, business_name, business_description, 
              status, rejection_reason, created_at
@@ -232,6 +284,17 @@ router.get('/requests', async (req, res) => {
 router.post('/approve/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
+
+    const dbAvailable = await checkDatabase();
+    
+    if (!dbAvailable) {
+      const user = fallbackData.users.find(u => u.id === userId);
+      if (user) {
+        user.status = 'approved';
+        user.approved_at = new Date();
+      }
+      return res.json({ success: true, message: 'Acesso aprovado (modo fallback)' });
+    }
 
     await database.run(`
       UPDATE users 

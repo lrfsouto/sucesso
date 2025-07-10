@@ -12,6 +12,12 @@ class Database {
 
   async connect() {
     try {
+      // Se não tiver configuração MySQL, usar modo fallback
+      if (!process.env.MYSQL_HOST && !process.env.MYSQL_URL) {
+        console.log('⚠️ MySQL não configurado, usando modo fallback');
+        throw new Error('MySQL não configurado');
+      }
+      
       // Configuração do MySQL
       const config = {
         host: process.env.MYSQL_HOST || 'localhost',
@@ -44,6 +50,10 @@ class Database {
       return this.pool;
     } catch (error) {
       console.error('❌ Erro ao conectar com MySQL:', error.message);
+      console.log('💡 Para usar MySQL:');
+      console.log('   1. Configure as variáveis MYSQL_* no .env');
+      console.log('   2. Ou use MYSQL_URL do Railway');
+      console.log('   3. Verifique se o MySQL está rodando');
       throw error;
     }
   }

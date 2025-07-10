@@ -95,13 +95,14 @@ async function initializeDatabase() {
     const tables = await database.all("SHOW TABLES");
     if (tables.length === 0) {
       console.log('📋 Banco vazio, executando inicialização...');
+      await database.close();
       await initDatabase();
     } else {
       console.log('✅ Banco já inicializado');
     }
   } catch (error) {
     console.error('❌ Erro na inicialização do banco:', error);
-    // Não parar o servidor, apenas logar o erro
+    console.log('⚠️ Continuando sem banco de dados - modo fallback');
   }
 }
 
@@ -191,6 +192,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`📊 Health: http://localhost:${PORT}/health`);
   console.log(`🔒 Ambiente: ${process.env.NODE_ENV || 'production'}`);
   console.log(`⏰ Uptime: ${process.uptime()}s`);
+  
+  // Inicializar banco após o servidor estar rodando
+  initializeDatabase();
 });
 
 // Graceful shutdown
