@@ -1,21 +1,38 @@
 import mysql from 'mysql2/promise';
-import { fileURLToPath } from 'url';
-import path from 'path';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 class Database {
   constructor() {
     this.pool = null;
+    this.isConnected = false;
   }
 
   async connect() {
     try {
+      // Verificar se já está conectado
+      if (this.isConnected && this.pool) {
+        return this.pool;
+      }
+      
+      // Configurar MySQL a partir da URL do Railway se disponível
+      if (process.env.MYSQL_URL && !process.env.MYSQL_HOST) {
+        try {
+          const url = new URL(process.env.MYSQL_URL);
+          process.env.MYSQL_HOST = url.hostname;
+          process.env.MYSQL_PORT = url.port || '3306';
+          process.env.MYSQL_USER = url.username;
+          process.env.MYSQL_PASSWORD = url.password;
+          process.env.MYSQL_DATABASE = url.pathname.substring(1);
+          console.log('🔗 Configuração MySQL extraída da MYSQL_URL');
+        } catch (error) {
+          console.error('❌ Erro ao processar MYSQL_URL:', error);
+        }
+      }
+      
       // Se não tiver configuração MySQL, usar modo fallback
       if (!process.env.MYSQL_HOST && !process.env.MYSQL_URL) {
         console.log('⚠️ MySQL não configurado, usando modo fallback');
-        throw new Error('MySQL não configurado');
+        this.isConnected = false;
+        return null;
       }
       
       // Configuração do MySQL
@@ -45,27 +62,31 @@ class Database {
       // Testar conexão
       const connection = await this.pool.getConnection();
       console.log('✅ Conectado ao MySQL com sucesso!');
+      this.isConnected = true;
       connection.release();
 
       return this.pool;
     } catch (error) {
       console.error('❌ Erro ao conectar com MySQL:', error.message);
-      console.log('💡 Para usar MySQL:');
-      console.log('   1. Configure as variáveis MYSQL_* no .env');
-      console.log('   2. Ou use MYSQL_URL do Railway');
-      console.log('   3. Verifique se o MySQL está rodando');
-      throw error;
+      console.log('⚠️ Continuando em modo fallback (dados em memória)');
+      this.isConnected = false;
+      return null;
     }
   }
 
   async close() {
-    if (this.pool) {
+    if (this.pool && this.isConnected) {
       await this.pool.end();
+      this.isConnected = false;
       console.log('🔒 Conexão com MySQL fechada');
     }
   }
 
   async run(sql, params = []) {
+    if (!this.isConnected || !this.pool) {
+      throw new Error('MySQL não conectado - usando modo fallback');
+    }
+    
     try {
       const [result] = await this.pool.execute(sql, params);
       return {
@@ -82,6 +103,10 @@ class Database {
   }
 
   async get(sql, params = []) {
+    if (!this.isConnected || !this.pool) {
+      throw new Error('MySQL não conectado - usando modo fallback');
+    }
+    
     try {
       const [rows] = await this.pool.execute(sql, params);
       return rows[0] || null;
@@ -94,6 +119,10 @@ class Database {
   }
 
   async all(sql, params = []) {
+    if (!this.isConnected || !this.pool) {
+      throw new Error('MySQL não conectado - usando modo fallback');
+    }
+    
     try {
       const [rows] = await this.pool.execute(sql, params);
       return rows;
@@ -106,6 +135,10 @@ class Database {
   }
 
   async transaction(operations) {
+    if (!this.isConnected || !this.pool) {
+      throw new Error('MySQL não conectado - usando modo fallback');
+    }
+    
     const connection = await this.pool.getConnection();
     
     try {
@@ -133,6 +166,10 @@ class Database {
 
   // Método para executar múltiplas queries (útil para inicialização)
   async executeMultiple(queries) {
+    if (!this.isConnected || !this.pool) {
+      throw new Error('MySQL não conectado - usando modo fallback');
+    }
+    
     const connection = await this.pool.getConnection();
     
     try {
@@ -149,5 +186,10 @@ class Database {
 
 // Instância singleton
 const database = new Database();
+
+// Tentar conectar automaticamente
+database.connect().catch(() => {
+  console.log('⚠️ Falha na conexão inicial - modo fallback ativado');
+});
 
 export default database;

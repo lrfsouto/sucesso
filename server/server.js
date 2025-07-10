@@ -6,14 +6,13 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import database from './database/connection.js';
-import initDatabase from './scripts/init-database.js';
 
 // Configurar __dirname para ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Carregar variáveis de ambiente
-dotenv.config({ path: path.resolve(__dirname, '.env') });
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -34,27 +33,6 @@ console.log('📁 __dirname:', __dirname);
 console.log('🌍 NODE_ENV:', process.env.NODE_ENV);
 console.log('🔌 PORT:', PORT);
 
-// Configurar MySQL a partir da URL do Railway se disponível
-if (process.env.MYSQL_URL && !process.env.MYSQL_HOST) {
-  try {
-    const url = new URL(process.env.MYSQL_URL);
-    process.env.MYSQL_HOST = url.hostname;
-    process.env.MYSQL_PORT = url.port || '3306';
-    process.env.MYSQL_USER = url.username;
-    process.env.MYSQL_PASSWORD = url.password;
-    process.env.MYSQL_DATABASE = url.pathname.substring(1);
-    console.log('🔗 Configuração MySQL extraída da MYSQL_URL');
-  } catch (error) {
-    console.error('❌ Erro ao processar MYSQL_URL:', error);
-  }
-}
-
-console.log('🗄️ MySQL Config:');
-console.log('   Host:', process.env.MYSQL_HOST);
-console.log('   Port:', process.env.MYSQL_PORT);
-console.log('   Database:', process.env.MYSQL_DATABASE);
-console.log('   User:', process.env.MYSQL_USER);
-
 // Health check PRIMEIRO - antes de qualquer middleware
 app.get('/health', (req, res) => {
   console.log('❤️ Health check acessado');
@@ -65,8 +43,7 @@ app.get('/health', (req, res) => {
     environment: process.env.NODE_ENV || 'production',
     uptime: process.uptime(),
     port: PORT,
-    pid: process.pid,
-    database: 'MySQL'
+    pid: process.pid
   });
 });
 
@@ -80,33 +57,9 @@ app.get('/api/health', (req, res) => {
     environment: process.env.NODE_ENV || 'production',
     uptime: process.uptime(),
     port: PORT,
-    pid: process.pid,
-    database: 'MySQL'
+    pid: process.pid
   });
 });
-
-// Inicializar banco de dados
-async function initializeDatabase() {
-  try {
-    console.log('🔧 Inicializando conexão com banco de dados...');
-    await database.connect();
-    
-    // Executar script de inicialização apenas se necessário
-    const tables = await database.all("SHOW TABLES");
-    if (tables.length === 0) {
-      console.log('📋 Banco vazio, executando inicialização...');
-      await database.close();
-      await initDatabase();
-    } else {
-      console.log('✅ Banco já inicializado');
-    }
-  } catch (error) {
-    console.error('❌ Erro na inicialização do banco:', error);
-    console.log('⚠️ Continuando sem banco de dados - modo fallback ativado');
-    console.log('💡 Para usar MySQL, configure as variáveis no arquivo server/.env');
-    // Não relançar o erro - continuar em modo fallback
-  }
-}
 
 // Middleware básico primeiro
 app.use(express.json({ limit: '10mb' }));
@@ -194,9 +147,6 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`📊 Health: http://localhost:${PORT}/health`);
   console.log(`🔒 Ambiente: ${process.env.NODE_ENV || 'production'}`);
   console.log(`⏰ Uptime: ${process.uptime()}s`);
-  
-  // Inicializar banco após o servidor estar rodando
-  initializeDatabase();
 });
 
 // Graceful shutdown
