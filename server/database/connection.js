@@ -1,124 +1,138 @@
-import sqlite3 from 'sqlite3';
-import path from 'path';
+import mysql from 'mysql2/promise';
 import { fileURLToPath } from 'url';
-import fs from 'fs';
+import path from 'path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Garantir que o diretório do banco existe
-const dbDir = path.dirname(process.env.DATABASE_PATH || './database/vitana.db');
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-}
-
-const dbPath = process.env.DATABASE_PATH || path.join(__dirname, 'vitana.db');
-
-// Configurar SQLite para modo verbose em desenvolvimento
-const sqlite = process.env.NODE_ENV === 'development' ? sqlite3.verbose() : sqlite3;
-
 class Database {
   constructor() {
-    this.db = null;
+    this.pool = null;
   }
 
-  connect() {
-    return new Promise((resolve, reject) => {
-      this.db = new sqlite.Database(dbPath, (err) => {
-        if (err) {
-          console.error('❌ Erro ao conectar com o banco:', err.message);
-          reject(err);
-        } else {
-          console.log('✅ Conectado ao banco SQLite:', dbPath);
-          
-          // Configurar WAL mode para melhor performance
-          this.db.run('PRAGMA journal_mode = WAL;');
-          this.db.run('PRAGMA synchronous = NORMAL;');
-          this.db.run('PRAGMA cache_size = 1000;');
-          this.db.run('PRAGMA foreign_keys = ON;');
-          
-          resolve();
-        }
-      });
-    });
-  }
-
-  close() {
-    return new Promise((resolve, reject) => {
-      if (this.db) {
-        this.db.close((err) => {
-          if (err) {
-            reject(err);
-          } else {
-            console.log('🔒 Conexão com banco fechada');
-            resolve();
-          }
-        });
-      } else {
-        resolve();
-      }
-    });
-  }
-
-  run(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.run(sql, params, function(err) {
-        if (err) {
-          console.error('❌ Erro SQL:', err.message);
-          console.error('📝 Query:', sql);
-          console.error('📋 Params:', params);
-          reject(err);
-        } else {
-          resolve({ id: this.lastID, changes: this.changes });
-        }
-      });
-    });
-  }
-
-  get(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.get(sql, params, (err, row) => {
-        if (err) {
-          console.error('❌ Erro SQL:', err.message);
-          console.error('📝 Query:', sql);
-          console.error('📋 Params:', params);
-          reject(err);
-        } else {
-          resolve(row);
-        }
-      });
-    });
-  }
-
-  all(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.all(sql, params, (err, rows) => {
-        if (err) {
-          console.error('❌ Erro SQL:', err.message);
-          console.error('📝 Query:', sql);
-          console.error('📋 Params:', params);
-          reject(err);
-        } else {
-          resolve(rows);
-        }
-      });
-    });
-  }
-
-  // Método para executar transações
-  async transaction(operations) {
-    await this.run('BEGIN TRANSACTION');
+  async connect() {
     try {
+      // Configuração do MySQL
+      const config = {
+        host: process.env.MYSQL_HOST || 'localhost',
+        port: process.env.MYSQL_PORT || 3306,
+        user: process.env.MYSQL_USER || 'root',
+        password: process.env.MYSQL_PASSWORD || '',
+        database: process.env.MYSQL_DATABASE || 'vitana_db',
+        waitForConnections: true,
+        connectionLimit: 10,
+        queueLimit: 0,
+        acquireTimeout: 60000,
+        timeout: 60000,
+        reconnect: true,
+        charset: 'utf8mb4',
+        timezone: '+00:00'
+      };
+
+      console.log('🔌 Conectando ao MySQL...');
+      console.log(`📍 Host: ${config.host}:${config.port}`);
+      console.log(`🗄️ Database: ${config.database}`);
+      console.log(`👤 User: ${config.user}`);
+
+      this.pool = mysql.createPool(config);
+
+      // Testar conexão
+      const connection = await this.pool.getConnection();
+      console.log('✅ Conectado ao MySQL com sucesso!');
+      connection.release();
+
+      return this.pool;
+    } catch (error) {
+      console.error('❌ Erro ao conectar com MySQL:', error.message);
+      throw error;
+    }
+  }
+
+  async close() {
+    if (this.pool) {
+      await this.pool.end();
+      console.log('🔒 Conexão com MySQL fechada');
+    }
+  }
+
+  async run(sql, params = []) {
+    try {
+      const [result] = await this.pool.execute(sql, params);
+      return {
+        id: result.insertId,
+        changes: result.affectedRows,
+        result
+      };
+    } catch (error) {
+      console.error('❌ Erro SQL:', error.message);
+      console.error('📝 Query:', sql);
+      console.error('📋 Params:', params);
+      throw error;
+    }
+  }
+
+  async get(sql, params = []) {
+    try {
+      const [rows] = await this.pool.execute(sql, params);
+      return rows[0] || null;
+    } catch (error) {
+      console.error('❌ Erro SQL:', error.message);
+      console.error('📝 Query:', sql);
+      console.error('📋 Params:', params);
+      throw error;
+    }
+  }
+
+  async all(sql, params = []) {
+    try {
+      const [rows] = await this.pool.execute(sql, params);
+      return rows;
+    } catch (error) {
+      console.error('❌ Erro SQL:', error.message);
+      console.error('📝 Query:', sql);
+      console.error('📋 Params:', params);
+      throw error;
+    }
+  }
+
+  async transaction(operations) {
+    const connection = await this.pool.getConnection();
+    
+    try {
+      await connection.beginTransaction();
+      
       const results = [];
       for (const operation of operations) {
-        const result = await this.run(operation.sql, operation.params);
-        results.push(result);
+        const [result] = await connection.execute(operation.sql, operation.params);
+        results.push({
+          id: result.insertId,
+          changes: result.affectedRows,
+          result
+        });
       }
-      await this.run('COMMIT');
+      
+      await connection.commit();
       return results;
     } catch (error) {
-      await this.run('ROLLBACK');
+      await connection.rollback();
       throw error;
+    } finally {
+      connection.release();
+    }
+  }
+
+  // Método para executar múltiplas queries (útil para inicialização)
+  async executeMultiple(queries) {
+    const connection = await this.pool.getConnection();
+    
+    try {
+      for (const query of queries) {
+        if (query.trim()) {
+          await connection.execute(query);
+        }
+      }
+    } finally {
+      connection.release();
     }
   }
 }

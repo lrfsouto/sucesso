@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 
 const initDatabase = async () => {
   try {
-    console.log('🔧 Inicializando banco de dados...');
+    console.log('🔧 Inicializando banco de dados MySQL...');
     
     await database.connect();
 
@@ -13,163 +13,176 @@ const initDatabase = async () => {
     // Tabela de usuários e autenticação
     await database.run(`
       CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        full_name TEXT NOT NULL,
-        business_name TEXT NOT NULL,
+        id VARCHAR(36) PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        full_name VARCHAR(255) NOT NULL,
+        business_name VARCHAR(255) NOT NULL,
         business_description TEXT,
-        status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'restricted')),
+        status ENUM('pending', 'approved', 'rejected', 'restricted') DEFAULT 'pending',
         rejection_reason TEXT,
         restriction_reason TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        approved_at DATETIME,
-        restricted_at DATETIME
-      )
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        approved_at TIMESTAMP NULL,
+        restricted_at TIMESTAMP NULL,
+        INDEX idx_email (email),
+        INDEX idx_status (status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
     // Tabela de credenciais (senhas)
     await database.run(`
       CREATE TABLE IF NOT EXISTS user_credentials (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        username TEXT NOT NULL,
-        password_hash TEXT NOT NULL,
-        role TEXT NOT NULL CHECK (role IN ('admin', 'operator')),
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_login DATETIME,
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        username VARCHAR(100) NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        role ENUM('admin', 'operator') NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_login TIMESTAMP NULL,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
-        UNIQUE(user_id, username)
-      )
+        UNIQUE KEY unique_user_username (user_id, username),
+        INDEX idx_user_id (user_id),
+        INDEX idx_username (username)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
     // Tabela de estabelecimentos
     await database.run(`
       CREATE TABLE IF NOT EXISTS businesses (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        subtitle TEXT,
+        id VARCHAR(36) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        subtitle VARCHAR(255),
         logo_url TEXT,
         use_custom_logo BOOLEAN DEFAULT FALSE,
-        plan TEXT DEFAULT 'free' CHECK (plan IN ('free', 'premium')),
-        owner_id TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (owner_id) REFERENCES users (id)
-      )
+        plan ENUM('free', 'premium') DEFAULT 'free',
+        owner_id VARCHAR(36),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (owner_id) REFERENCES users (id),
+        INDEX idx_owner_id (owner_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
     // Tabela de produtos
     await database.run(`
       CREATE TABLE IF NOT EXISTS products (
-        id TEXT PRIMARY KEY,
-        business_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        barcode TEXT,
-        category TEXT,
-        brand TEXT,
+        id VARCHAR(36) PRIMARY KEY,
+        business_id VARCHAR(36) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        barcode VARCHAR(50),
+        category VARCHAR(100),
+        brand VARCHAR(100),
         price DECIMAL(10,2) NOT NULL,
         cost DECIMAL(10,2),
-        stock INTEGER DEFAULT 0,
-        min_stock INTEGER DEFAULT 0,
-        unit TEXT DEFAULT 'unidade',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (business_id) REFERENCES businesses (id) ON DELETE CASCADE
-      )
+        stock INT DEFAULT 0,
+        min_stock INT DEFAULT 0,
+        unit VARCHAR(20) DEFAULT 'unidade',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (business_id) REFERENCES businesses (id) ON DELETE CASCADE,
+        INDEX idx_business_id (business_id),
+        INDEX idx_barcode (barcode),
+        INDEX idx_category (category),
+        INDEX idx_name (name)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
     // Tabela de vendas
     await database.run(`
       CREATE TABLE IF NOT EXISTS sales (
-        id TEXT PRIMARY KEY,
-        business_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
+        id VARCHAR(36) PRIMARY KEY,
+        business_id VARCHAR(36) NOT NULL,
+        user_id VARCHAR(36) NOT NULL,
         total DECIMAL(10,2) NOT NULL,
-        payment_method TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        payment_method VARCHAR(20) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (business_id) REFERENCES businesses (id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-      )
+        FOREIGN KEY (user_id) REFERENCES users (id),
+        INDEX idx_business_id (business_id),
+        INDEX idx_user_id (user_id),
+        INDEX idx_created_at (created_at),
+        INDEX idx_payment_method (payment_method)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
     // Tabela de itens de venda
     await database.run(`
       CREATE TABLE IF NOT EXISTS sale_items (
-        id TEXT PRIMARY KEY,
-        sale_id TEXT NOT NULL,
-        product_id TEXT NOT NULL,
-        product_name TEXT NOT NULL,
-        quantity INTEGER NOT NULL,
+        id VARCHAR(36) PRIMARY KEY,
+        sale_id VARCHAR(36) NOT NULL,
+        product_id VARCHAR(36) NOT NULL,
+        product_name VARCHAR(255) NOT NULL,
+        quantity INT NOT NULL,
         unit_price DECIMAL(10,2) NOT NULL,
         total DECIMAL(10,2) NOT NULL,
         FOREIGN KEY (sale_id) REFERENCES sales (id) ON DELETE CASCADE,
-        FOREIGN KEY (product_id) REFERENCES products (id)
-      )
+        FOREIGN KEY (product_id) REFERENCES products (id),
+        INDEX idx_sale_id (sale_id),
+        INDEX idx_product_id (product_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
     // Tabela de movimentações de estoque
     await database.run(`
       CREATE TABLE IF NOT EXISTS stock_movements (
-        id TEXT PRIMARY KEY,
-        business_id TEXT NOT NULL,
-        product_id TEXT NOT NULL,
-        type TEXT NOT NULL CHECK (type IN ('entrada', 'saida')),
-        quantity INTEGER NOT NULL,
-        reason TEXT,
+        id VARCHAR(36) PRIMARY KEY,
+        business_id VARCHAR(36) NOT NULL,
+        product_id VARCHAR(36) NOT NULL,
+        type ENUM('entrada', 'saida') NOT NULL,
+        quantity INT NOT NULL,
+        reason VARCHAR(255),
         unit_cost DECIMAL(10,2),
         total_cost DECIMAL(10,2),
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (business_id) REFERENCES businesses (id) ON DELETE CASCADE,
-        FOREIGN KEY (product_id) REFERENCES products (id)
-      )
+        FOREIGN KEY (product_id) REFERENCES products (id),
+        INDEX idx_business_id (business_id),
+        INDEX idx_product_id (product_id),
+        INDEX idx_type (type),
+        INDEX idx_created_at (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
     // Tabela de NFCe
     await database.run(`
       CREATE TABLE IF NOT EXISTS nfce (
-        id TEXT PRIMARY KEY,
-        business_id TEXT NOT NULL,
-        sale_id TEXT NOT NULL,
-        numero INTEGER NOT NULL,
-        serie INTEGER NOT NULL,
-        chave_acesso TEXT,
-        status TEXT DEFAULT 'pendente' CHECK (status IN ('pendente', 'autorizada', 'rejeitada', 'cancelada')),
-        protocolo_autorizacao TEXT,
+        id VARCHAR(36) PRIMARY KEY,
+        business_id VARCHAR(36) NOT NULL,
+        sale_id VARCHAR(36) NOT NULL,
+        numero INT NOT NULL,
+        serie INT NOT NULL,
+        chave_acesso VARCHAR(44),
+        status ENUM('pendente', 'autorizada', 'rejeitada', 'cancelada') DEFAULT 'pendente',
+        protocolo_autorizacao VARCHAR(50),
         motivo_rejeicao TEXT,
-        xml_gerado TEXT,
-        xml_autorizado TEXT,
+        xml_gerado LONGTEXT,
+        xml_autorizado LONGTEXT,
         valor_total DECIMAL(10,2) NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        authorized_at DATETIME,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        authorized_at TIMESTAMP NULL,
         FOREIGN KEY (business_id) REFERENCES businesses (id) ON DELETE CASCADE,
-        FOREIGN KEY (sale_id) REFERENCES sales (id)
-      )
+        FOREIGN KEY (sale_id) REFERENCES sales (id),
+        INDEX idx_business_id (business_id),
+        INDEX idx_sale_id (sale_id),
+        INDEX idx_numero_serie (numero, serie),
+        INDEX idx_status (status),
+        INDEX idx_chave_acesso (chave_acesso)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
     // Tabela de configurações
     await database.run(`
       CREATE TABLE IF NOT EXISTS settings (
-        id TEXT PRIMARY KEY,
-        business_id TEXT NOT NULL,
-        key TEXT NOT NULL,
+        id VARCHAR(36) PRIMARY KEY,
+        business_id VARCHAR(36) NOT NULL,
+        \`key\` VARCHAR(100) NOT NULL,
         value TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (business_id) REFERENCES businesses (id) ON DELETE CASCADE,
-        UNIQUE(business_id, key)
-      )
+        UNIQUE KEY unique_business_key (business_id, \`key\`),
+        INDEX idx_business_id (business_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
-
-    // Criar índices para performance
-    console.log('🔍 Criando índices...');
-    
-    await database.run('CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)');
-    await database.run('CREATE INDEX IF NOT EXISTS idx_users_status ON users (status)');
-    await database.run('CREATE INDEX IF NOT EXISTS idx_credentials_user_id ON user_credentials (user_id)');
-    await database.run('CREATE INDEX IF NOT EXISTS idx_products_business_id ON products (business_id)');
-    await database.run('CREATE INDEX IF NOT EXISTS idx_products_barcode ON products (barcode)');
-    await database.run('CREATE INDEX IF NOT EXISTS idx_sales_business_id ON sales (business_id)');
-    await database.run('CREATE INDEX IF NOT EXISTS idx_sales_created_at ON sales (created_at)');
-    await database.run('CREATE INDEX IF NOT EXISTS idx_stock_movements_product_id ON stock_movements (product_id)');
 
     // Inserir dados iniciais
     console.log('📦 Inserindo dados iniciais...');
@@ -266,7 +279,7 @@ const initDatabase = async () => {
       console.log('✅ Produtos iniciais inseridos');
     }
 
-    console.log('🎉 Banco de dados inicializado com sucesso!');
+    console.log('🎉 Banco de dados MySQL inicializado com sucesso!');
     
   } catch (error) {
     console.error('❌ Erro ao inicializar banco:', error);

@@ -34,9 +34,6 @@ COPY --from=builder /app/server/package*.json ./server/
 # Install only production dependencies
 RUN cd server && npm ci --omit=dev
 
-# Create database directory with proper permissions
-RUN mkdir -p ./server/database && chmod 755 ./server/database
-
 # Create a non-root user
 RUN addgroup -g 1001 -S nodejs
 RUN adduser -S nextjs -u 1001
